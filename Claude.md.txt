@@ -1,0 +1,28 @@
+# Project: Satellite Land-Cover Classification & Deforestation Detection
+
+## About me
+- I'm a beginner: little coding and no ML experience. I'm doing this to LEARN,
+  not just to get a result. This may become a student research paper.
+
+## How to work with me
+- Explain every script before/after writing it, in plain English.
+- Work in small steps: one script at a time. Run it, show me the output,
+  and wait for me to confirm I understand before moving on.
+- When errors happen, explain what the error means before fixing it.
+- Quiz me occasionally on concepts we've used (transfer learning, overfitting,
+  train/val/test splits) so I actually retain them.
+- Never fabricate results or metrics. Report actual numbers from actual runs.
+
+## The project (follows the PDF guide in this folder)
+1. Environment setup: verify my NVIDIA GPU works with PyTorch (CUDA)
+2. Download EuroSAT RGB dataset, explore it (sample images, class counts)
+3. Train: ResNet50 transfer learning, 80/10/10 split, ImageNet normalization,
+   freeze all but final layer, ~10 epochs; then optional full fine-tune at lr=1e-4
+4. Evaluate: test accuracy, per-class report, confusion matrix figure
+5. Change detection: patch a Sentinel-2 image into 64x64 tiles, classify both
+   years, flag Forest → other transitions
+6. Validate against Global Forest Watch data
+
+## Conventions
+- Python, PyTorch. Save trained weights to ./models/, figures to ./figures/
+- Keep scripts readable with comments aimed at a beginner
