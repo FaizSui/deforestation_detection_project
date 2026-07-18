@@ -1,0 +1,19 @@
+# Python 3.13. Versions pinned to the environment used for the paper.
+#
+# PyTorch is installed separately because the CUDA build comes from
+# PyTorch's own package index, not PyPI:
+#   pip install torch==2.12.1 torchvision==0.27.1 --index-url https://download.pytorch.org/whl/cu130
+# (swap cu130 for your CUDA version, or use the CPU index, as needed)
+
+numpy==2.4.4
+pillow==12.2.0
+matplotlib==3.11.0
+scikit-learn==1.9.0
+seaborn==0.13.2
+requests==2.34.2
+python-dotenv==1.2.2
+rasterio==1.5.0
+pyproj==3.7.2
+
+# Optional: only needed to regenerate paper/manuscript.docx (script 13)
+# pypandoc_binary==1.16

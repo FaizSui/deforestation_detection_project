@@ -97,6 +97,9 @@ def evaluate(model_path, tag):
     print(f"Overall test accuracy: {overall_accuracy:.4f}")
 
     cm = confusion_matrix(all_labels, all_preds)
+    # Save the raw matrix so publication-figure scripts can restyle it
+    # without re-running GPU inference.
+    np.save(os.path.join(os.path.dirname(__file__), "..", "data", f"confusion_matrix_{tag}.npy"), cm)
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt="d", xticklabels=classes, yticklabels=classes, cmap="Greens")
     plt.xlabel("Predicted")

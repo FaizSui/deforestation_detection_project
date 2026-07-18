@@ -43,6 +43,19 @@ different color balance (atmospheric haze brightens the blue channel in
 L1C), which caused systematic misclassification when we first tried L2A.
 Matching the same processing level as the training data avoids that
 train/serve mismatch.
+
+Note on coordinate system: the actual image request is made in a LOCAL
+UTM PROJECTION (meters), not raw latitude/longitude degrees. Degrees of
+longitude and latitude don't correspond to a fixed number of meters --
+that distance shrinks toward the poles and even varies slightly with
+which direction you're measuring. Requesting a bbox directly in degrees
+and dividing by a pixel count only gives an *approximate* meters/pixel
+resolution (an earlier version of this script was off by about 3% in the
+east-west direction because of exactly this). Working in UTM meters
+avoids the approximation entirely: we pick a center point, define the
+bbox as exactly +/-8000m and +/-8320m in projected meters, and request
+exactly 1600x1664 pixels -- giving an EXACT 10.000 m/pixel resolution,
+matching EuroSAT's stated resolution precisely rather than approximately.
 """
 
 import io
@@ -52,6 +65,7 @@ import sys
 import numpy as np
 import requests
 from PIL import Image
+from pyproj import Transformer
 from dotenv import load_dotenv
 
 load_dotenv()  # reads CDSE_CLIENT_ID / CDSE_CLIENT_SECRET from a .env file in this folder or a parent folder
@@ -62,21 +76,46 @@ TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/
 CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 
-# Bounding box over the BR-364 corridor southeast of Porto Velho, Rondonia.
-# Format: [min_lon, min_lat, max_lon, max_lat] in plain latitude/longitude
-# (WGS84). This box is about 16.5km x 16.7km -- big enough to show several
-# "fishbone" deforestation branches off the highway, small enough to stay
-# under the Process API's per-request pixel limit at 10m/pixel resolution.
-# Adjust these four numbers if you want to shift or resize the area.
-BBOX = [-63.625, -9.125, -63.475, -8.975]
+# Center point over the BR-364 corridor southeast of Porto Velho, Rondonia.
+# Everything below is derived from this single point, so shifting the
+# study area is just a matter of changing these two numbers.
+CENTER_LON = -63.55
+CENTER_LAT = -9.05
 
 # At 10 meters/pixel (matching EuroSAT's resolution, so our trained model
-# sees imagery at the same scale it learned on), this bbox comes out to
-# roughly 1649 x 1670 pixels. We round down to a multiple of 64 so the
-# later patch-tiling step (64x64 patches) divides the image evenly with
-# no leftover sliver at the edges.
-WIDTH_PX = 1600   # 25 patches of 64px
-HEIGHT_PX = 1664  # 26 patches of 64px
+# sees imagery at the same scale it learned on), our 25x26-patch grid
+# (64px patches) needs exactly 1600 x 1664 pixels.
+WIDTH_PX = 1600   # 25 patches of 64px -> exactly 16,000 m at 10 m/pixel
+HEIGHT_PX = 1664  # 26 patches of 64px -> exactly 16,640 m at 10 m/pixel
+
+# UTM zone number = floor((lon + 180) / 6) + 1. EPSG:327xx is WGS84 UTM
+# zone xx, southern hemisphere (327 prefix; 326 would be northern).
+_UTM_ZONE = int((CENTER_LON + 180) / 6) + 1
+PROCESS_CRS_EPSG = 32700 + _UTM_ZONE
+PROCESS_CRS_URI = f"http://www.opengis.net/def/crs/EPSG/0/{PROCESS_CRS_EPSG}"
+
+_to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{PROCESS_CRS_EPSG}", always_xy=True)
+_center_easting, _center_northing = _to_utm.transform(CENTER_LON, CENTER_LAT)
+
+_half_width_m = WIDTH_PX * 10 / 2
+_half_height_m = HEIGHT_PX * 10 / 2
+
+# The bbox actually sent to the Process API: exact meters, exact 10m/pixel.
+PROCESS_BBOX = [
+    _center_easting - _half_width_m,
+    _center_northing - _half_height_m,
+    _center_easting + _half_width_m,
+    _center_northing + _half_height_m,
+]
+
+# The Catalog API's bbox parameter is always expected in plain lon/lat
+# (WGS84), regardless of the imagery's native CRS -- and it's only used
+# to find overlapping scenes, so it doesn't need to be pixel-exact. We
+# derive an approximate lon/lat box from the same UTM box for that search.
+_to_lonlat = Transformer.from_crs(f"EPSG:{PROCESS_CRS_EPSG}", "EPSG:4326", always_xy=True)
+_lon_min, _lat_min = _to_lonlat.transform(PROCESS_BBOX[0], PROCESS_BBOX[1])
+_lon_max, _lat_max = _to_lonlat.transform(PROCESS_BBOX[2], PROCESS_BBOX[3])
+CATALOG_BBOX = [_lon_min, _lat_min, _lon_max, _lat_max]
 
 SEARCH_WINDOWS = {
     2018: ("2018-07-01T00:00:00Z", "2018-08-31T23:59:59Z"),
@@ -84,10 +123,24 @@ SEARCH_WINDOWS = {
 }
 
 # Standard Sentinel-2 true-color rendering (same visual convention used by
-# Sentinel Hub's EO Browser): read the Red, Green, Blue bands and apply a
-# brightness gain so the image doesn't look too dark. sampleType "AUTO"
-# with image/png output means the result is auto-scaled to normal 0-255
-# pixel values, just like a regular photo.
+# Sentinel Hub's EO Browser): read the Red, Green, Blue bands (each a
+# dimensionless top-of-atmosphere reflectance value, nominally 0-1) and
+# apply a 2.5x brightness gain so the image isn't too dark -- vegetation
+# and soil reflect well under half of incoming light, so without this
+# gain a raw reflectance render looks nearly black.
+#
+# sampleType "AUTO" then converts each gained value to an 8-bit pixel via
+# a documented, exact rule (Sentinel Hub Evalscript V3 spec): values are
+# linearly stretched from [0, 1] to [0, 255] and clamped at both ends --
+# NO gamma correction is applied. Combined with our 2.5x gain, the full
+# formula from raw reflectance to output pixel value is:
+#
+#     pixel_value = round(clip(2.5 * reflectance, 0, 1) * 255)
+#
+# which means any raw reflectance >= 0.4 in a band saturates that
+# channel to pure 255. This is worth knowing explicitly: very bright
+# surfaces (bare soil, rooftops, thin cloud) can hit this ceiling and
+# lose relative brightness differences above it.
 EVALSCRIPT = """
 //VERSION=3
 function setup() {
@@ -122,7 +175,7 @@ def find_best_date(token, time_from, time_to):
 
     request_body = {
         "collections": ["sentinel-2-l1c"],
-        "bbox": BBOX,
+        "bbox": CATALOG_BBOX,
         "datetime": f"{time_from}/{time_to}",
         "limit": 100,
     }
@@ -176,8 +229,8 @@ def request_image(token, date, width, height):
     request_body = {
         "input": {
             "bounds": {
-                "bbox": BBOX,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
+                "bbox": PROCESS_BBOX,
+                "properties": {"crs": PROCESS_CRS_URI},
             },
             "data": [
                 {

@@ -34,6 +34,7 @@ import os
 import numpy as np
 import rasterio
 from rasterio.windows import from_bounds
+from pyproj import Transformer
 import requests
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -41,12 +42,35 @@ from matplotlib.colors import ListedColormap
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 FIGURES_DIR = os.path.join(os.path.dirname(__file__), "..", "figures")
 
-# Same bbox used for our Sentinel-2 downloads (06_download_sentinel2.py) --
-# must match exactly so patches line up.
-BBOX = [-63.625, -9.125, -63.475, -8.975]
+# This MUST derive the exact same footprint as 06_download_sentinel2.py,
+# or the Hansen loss-year window read below will be shifted relative to
+# our patches. Rather than hardcode a separately-computed lon/lat box
+# (which is how a ~150-300m misalignment bug slipped in previously), we
+# rebuild the identical UTM-exact bbox from the same center point and
+# convert it back to lon/lat -- the Hansen tile's native CRS -- the same
+# way 06_download_sentinel2.py does for its own catalog search.
+CENTER_LON = -63.55
+CENTER_LAT = -9.05
 WIDTH_PX = 1600
 HEIGHT_PX = 1664
 PATCH_SIZE = 64
+
+_utm_zone = int((CENTER_LON + 180) / 6) + 1
+_utm_epsg = 32700 + _utm_zone
+_to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{_utm_epsg}", always_xy=True)
+_center_easting, _center_northing = _to_utm.transform(CENTER_LON, CENTER_LAT)
+_half_width_m = WIDTH_PX * 10 / 2
+_half_height_m = HEIGHT_PX * 10 / 2
+_utm_bbox = [
+    _center_easting - _half_width_m,
+    _center_northing - _half_height_m,
+    _center_easting + _half_width_m,
+    _center_northing + _half_height_m,
+]
+_to_lonlat = Transformer.from_crs(f"EPSG:{_utm_epsg}", "EPSG:4326", always_xy=True)
+_lon_min, _lat_min = _to_lonlat.transform(_utm_bbox[0], _utm_bbox[1])
+_lon_max, _lat_max = _to_lonlat.transform(_utm_bbox[2], _utm_bbox[3])
+BBOX = [_lon_min, _lat_min, _lon_max, _lat_max]
 N_ROWS = HEIGHT_PX // PATCH_SIZE  # 26
 N_COLS = WIDTH_PX // PATCH_SIZE   # 25
 
